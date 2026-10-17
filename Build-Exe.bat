@@ -1,0 +1,42 @@
+@echo off
+cd /d "%~dp0"
+title Build EXE
+echo ============================================
+echo   ShenLun Grid - Build an EXE (run once)
+echo ============================================
+echo.
+
+where python >nul 2>nul
+if errorlevel 1 (
+  echo [ERROR] Python was not found.
+  echo.
+  echo Please install Python first:
+  echo   1. Open https://www.python.org/downloads/
+  echo   2. Run the installer and TICK "Add python.exe to PATH"
+  echo   3. Re-run this file.
+  echo.
+  pause
+  exit /b
+)
+
+echo [1/2] Preparing the build tool (downloads on first run, please wait)...
+python -m pip install --upgrade pip
+python -m pip install pyinstaller
+if errorlevel 1 (
+  echo.
+  echo [ERROR] Could not install pyinstaller. Check your network and retry.
+  pause
+  exit /b
+)
+
+echo.
+echo [2/2] Building, please wait 1-2 minutes, do not close this window...
+python -m PyInstaller --onefile --console --name ShenLunGrid main.py
+
+echo.
+echo ============================================
+echo Done. The EXE is here:  dist\ShenLunGrid.exe
+echo Copy that exe to any folder and double-click to run.
+echo Saved drafts and history go into a folder next to the exe.
+echo ============================================
+pause
