@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 申论方格纸 · 离线本地练习器
-- 纯 Python 标准库，无需联网、无需安装第三方库
-- 双击启动后自动在浏览器打开页面，存档写在本程序同目录的「申论存档.json」
-- 可用附带的 打包成exe.bat 在 Windows 上一键生成 exe
 """
 import os
 import sys
@@ -169,7 +166,7 @@ def delete_history(entry_id):
     write_index(kept)
 
 
-# ============ 页面（内嵌，离线无外部依赖） ============
+# ============ 页面 ============
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -189,7 +186,7 @@ body{font-family:"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
   color:var(--ink);background:#ececee;display:flex;overflow:hidden}
 button{font-family:inherit;cursor:pointer}
 
-/* ===== 左侧栏（豆包式） ===== */
+/* ===== 左侧栏 ===== */
 #sidebar{width:272px;min-width:272px;background:var(--side-bg);
   border-right:1px solid var(--line);display:flex;flex-direction:column;height:100vh}
 .brand{padding:18px 18px 10px}
@@ -223,7 +220,7 @@ button{font-family:inherit;cursor:pointer}
 .h-item .h-btns .del{color:var(--danger)}
 .side-foot{padding:10px 14px;font-size:11px;color:#9aa0a8;border-top:1px solid var(--line);line-height:1.6}
 
-/* ===== 右侧主区 ===== */
+/* ===== 格子区 ===== */
 #main{flex:1;display:flex;flex-direction:column;min-width:0;height:100vh}
 .toolbar{height:56px;flex:none;background:#fff;border-bottom:1px solid var(--line);
   display:flex;align-items:center;gap:14px;padding:0 22px}
@@ -317,7 +314,7 @@ button{font-family:inherit;cursor:pointer}
   </div>
   <div class="side-section"><span>历史记录</span><span id="histMeta"></span></div>
   <div id="historyList"></div>
-  <div class="side-foot">存档保存在程序同目录的「申论存档」文件夹：当前草稿自动存为「当前草稿.txt」，每条历史是一个独立 txt，可直接打开、备份或拷贝。</div>
+  <div class="side-foot">存档保存在程序同目录的「申论存档」文件夹：当前草稿自动存为「当前草稿.txt」。</div>
 </aside>
 
 <!-- ===== 右侧主区 ===== -->
@@ -406,7 +403,7 @@ function tokenizePara(para, base){
   return toks;
 }
 
-// 每行 25 格；避头点：行满时标点并入上一格，绝不落到下一行行首
+// 每行 25 格；避头点：行满时标点并入上一格
 function buildLinesFrom(src){
   const lines=[]; let base=0;
   const paras=src.split('\n');
@@ -416,7 +413,7 @@ function buildLinesFrom(src){
     let cur=[];
     for(const tk of toks){
       if(cur.length>=COLS){
-        // 避头点：行满时标点并入上一格（连续标点随其一起），不上行首、不散开
+        // 避头点：行满时标点并入上一格
         if(cur.length && BAN_HEAD.has(tk.text[0])){
           cur[cur.length-1].text+=tk.text;
           cur[cur.length-1].merged=true;
@@ -430,14 +427,14 @@ function buildLinesFrom(src){
 }
 function buildLines(){ return buildLinesFrom(text); }
 
-// 所占格数（数字两位算一格，换行不算）
+// 所占格数
 function countCells(src){
   let n=0,base=0;
   for(const para of src.split('\n')){n+=tokenizePara(para,base).length;base+=para.length+1;}
   return n;
 }
 
-// 生成一行 25 格；caret 为当前逻辑光标（只读预览传 null）
+// 生成一行 25 格
 function rowHtml(line, caret, rowInPage, mini){
   let cells="";
   for(let c=0;c<COLS;c++){
@@ -462,7 +459,7 @@ function rowHtml(line, caret, rowInPage, mini){
   return `<div class="g-row">${cells}</div>${gap}`;
 }
 
-// 把任意文本铺成只读小方格（历史预览用）
+// 文本铺成只读方格，历史预览
 function previewSheet(srcText){
   const lines=buildLinesFrom(srcText);
   let html="";
@@ -690,4 +687,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-#（注：内容由AI生成）
