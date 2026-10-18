@@ -77,7 +77,7 @@ def write_index(items):
     os.replace(tmp, INDEX_PATH)
 
 
-# 标点集合（与前端一致：连续标点每两符号合占一格）
+# 标点集合（与前端一致：……、—— 合占一格，其余标点各占一格）
 _PUNCT = set("，。、；：！？）】」』”’…—·》〉（【「『“‘《〈,.!?;:)][(\"'<")
 
 
@@ -86,7 +86,8 @@ def _is_digit(ch):
 
 
 def count_cells(text):
-    """按稿纸格数统计：数字两位一格，连续标点每两符号合占一格，其余一字一格，换行不计。"""
+    """按稿纸格数统计，与前端一致：数字两位一格、数字后接 . 合并、
+    ：后接前引号合并、……/—— 合占一格，其余一字一格，换行不计。"""
     total = 0
     for para in text.split("\n"):
         i, n = 0, len(para)
@@ -97,13 +98,17 @@ def count_cells(text):
                 while j < n and _is_digit(para[j]):
                     j += 1
                 total += (j - i + 1) // 2  # 每两位一格，落单一位也算一格
-                i = j
-            elif ch in _PUNCT:
-                j = i
-                while j < n and para[j] in _PUNCT:
+                if j < n and para[j] == ".":  # 1. 数字与下脚点同格
                     j += 1
-                run = j - i
-                total += (run + 1) // 2  # 连续标点每两个合占一格，落单也算一格
+                i = j
+            elif ch in ("：", ":") and i + 1 < n and para[i + 1] in ("“", "‘", '"', "'"):
+                total += 1  # ：“ 合占一格
+                i += 2
+            elif ch in ("…", "—"):
+                j = i
+                while j < n and para[j] == ch:
+                    j += 1
+                total += 1  # …… / —— 合占一格
                 i = j
             else:
                 total += 1
@@ -167,10 +172,20 @@ def delete_history(entry_id):
 def open_save_folder():
     """在系统文件管理器中打开存档文件夹。"""
     ensure_dir()
+    if os.name == "nt":
+        try:
+            os.startfile(SAVE_DIR)
+            return True
+        except OSError:
+            pass
+        # 兜底：explorer 直接拉起
+        try:
+            subprocess.Popen(["explorer", SAVE_DIR])
+            return True
+        except OSError:
+            return False
     try:
-        if os.name == "nt":
-            os.startfile(SAVE_DIR)  # 仅 Windows
-        elif sys.platform == "darwin":
+        if sys.platform == "darwin":
             subprocess.Popen(["open", SAVE_DIR])
         else:
             subprocess.Popen(["xdg-open", SAVE_DIR])
@@ -335,15 +350,26 @@ button{font-family:inherit;cursor:pointer}
   z-index:99;padding:0;pointer-events:none}
 #ghost.live{opacity:.01}
 
-/* 历史预览弹窗 */
+/* 历史预览/确认/文件预览 弹窗 */
 #modalMask{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;
   align-items:center;justify-content:center;z-index:200}
 #modalMask.show{display:flex}
 .modal{width:min(920px,94vw);max-height:84vh;background:#fff;border-radius:14px;
   display:flex;flex-direction:column;overflow:hidden}
+.modal.small{width:min(560px,92vw)}
 .modal h3{padding:16px 20px;border-bottom:1px solid var(--line);font-size:16px}
 .modal .body{padding:20px 24px;overflow-y:auto;flex:1;background:#faf7f1}
 .modal .foot{padding:14px 20px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end}
+/* 页内确认弹窗（替代被浏览器拦截的原生 confirm/prompt） */
+#askMask{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;
+  align-items:center;justify-content:center;z-index:400}
+#askMask.show{display:flex}
+.ask{width:min(420px,90vw);background:#fff;border-radius:12px;padding:20px 22px;
+  box-shadow:0 8px 30px rgba(0,0,0,.25)}
+.ask p{font-size:14px;line-height:1.7;white-space:pre-wrap}
+.ask input{width:100%;margin-top:10px;border:1px solid var(--line);border-radius:8px;
+  padding:8px 10px;font-size:14px;font-family:inherit}
+.ask .ask-btns{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
 
 #toast{position:fixed;left:50%;bottom:34px;transform:translateX(-50%);
   background:rgba(30,30,32,.9);color:#fff;padding:10px 18px;border-radius:8px;
@@ -412,6 +438,18 @@ button{font-family:inherit;cursor:pointer}
     </div>
   </div>
 </div>
+
+<!-- 页内确认/输入弹窗 -->
+<div id="askMask">
+  <div class="ask">
+    <p id="askText"></p>
+    <input id="askInput" style="display:none">
+    <div class="ask-btns">
+      <button class="tbtn" id="askCancel">取消</button>
+      <button class="btn primary" id="askOk" style="padding:7px 16px">确定</button>
+    </div>
+  </div>
+</div>
 <div id="toast"></div>
 
 <script>
@@ -461,11 +499,14 @@ async function api(url, data){
 const DIGIT_RE=/[0-9０-９]/;
 // 避头标点：不得出现在一行第一个格子
 const BAN_HEAD=new Set(['，','。','、','；','：','！','？','）','】','」','』','”','’','…','—','·','》','〉',',','.',';',':','!','?',')',']']);
-// 全部标点（用于把连续标点如 …… —— “” 合到一格，不散开）
+// 全部标点
 const PUNCT_ALL=new Set([...BAN_HEAD,'（','【','「','『','“','‘','《','〈','(', '[']);
+// 与冒号连用合占一格的前引号（：“ 合一格）
+const OPEN_Q=new Set(['“','‘','"',''']);
 function normDigit(ch){const c=ch.codePointAt(0);return (c>=0xFF10&&c<=0xFF19)?String.fromCharCode(c-0xFEE0):ch;}
 
-// 把一整段切成「格单元」：连续数字每 2 个合占一格；连续标点（…… —— “”）合占一格；其余一字一格
+// 把一整段切成「格单元」：数字每 2 个合占一格；1. 2. 与 ：“ 合占一格；
+// …… —— 连续出现合占一格；其余（。，、等）一字一格
 function tokenizePara(para, base){
   const toks=[]; let i=0;
   while(i<para.length){
@@ -474,13 +515,23 @@ function tokenizePara(para, base){
       let j=i,raw="";
       while(j<para.length&&DIGIT_RE.test(para[j])){raw+=normDigit(para[j]);j++;}
       for(let k=0;k<raw.length;k+=2){toks.push({text:raw.slice(k,k+2),start:base+i+k,kind:'num'});}
+      if(j<para.length&&para[j]==='.'){ // 1. 2. 数字与下脚点合占一格
+        if(toks.length) toks[toks.length-1].text+='.';
+        j++;
+      }
+      i=j;
+    }else if((ch==='：'||ch===':')&&i+1<para.length&&OPEN_Q.has(para[i+1])){
+      toks.push({text:ch+para[i+1],start:base+i,kind:'punct'}); // ：“ 合占一格
+      i+=2;
+    }else if(ch==='…'||ch==='—'){
+      // 叠用符号：省略号 …… 、破折号 —— 连续出现合占一格
+      let j=i; while(j<para.length&&para[j]===ch) j++;
+      toks.push({text:para.slice(i,j),start:base+i,kind:'punct'});
       i=j;
     }else if(PUNCT_ALL.has(ch)){
-      // 连续标点合占一格（如 ：“ ，。 ！！ …… ——），每格最多放两个
-      let j=i, run="";
-      while(j<para.length&&PUNCT_ALL.has(para[j])){run+=para[j];j++;}
-      for(let k=0;k<run.length;k+=2){toks.push({text:run.slice(k,k+2),start:base+i+k,kind:'punct'});}
-      i=j;
+      // 普通标点各自占一格
+      toks.push({text:ch,start:base+i,kind:'punct'});
+      i++;
     }else{
       toks.push({text:ch,start:base+i,kind:ch===' '?'space':'ch'});
       i++;
@@ -589,7 +640,7 @@ function render(){
     html+=`<section class="page">
       <div class="page-head"><span class="ph-title">试 卷</span><span class="ph-no">第 ${p+1} 页</span></div>
       <div class="sheet">${sheetHtml}</div>
-      <div class="page-foot">25 × 20 = 500 字（数字两位一格，连续标点合占一格，标点不上行首）</div>
+      <div class="page-foot">25 × 20 = 500 字（1. 2. 与 ：“ 合占一格，数字两位一格，标点不上行首）</div>
     </section>`;
   }
   paperWrap.innerHTML=html;
@@ -627,14 +678,42 @@ function mergeLoaded(d, mode){
   render();
   toast(`已打开「${d.name||"文件"}」${d.truncated?"（超长部分已截断）":""}`);
 }
+// ---------- 打开文件：先弹预览窗（像新页面一样），再选「并入/替换/取消」 ----------
+function openPreview(d){
+  return new Promise(res=>{
+    const mask=document.getElementById("modalMask");
+    document.getElementById("modalTitle").innerHTML=
+      `文件预览 · ${esc(d.name||"文件")} · ${d.text.length} 字`;
+    const body=document.getElementById("modalBody");
+    body.className="body";
+    body.innerHTML=`<div style="white-space:pre-wrap;font-size:14px;line-height:1.9;
+      max-height:52vh;overflow:auto;background:#fff;border:1px solid var(--line);
+      border-radius:8px;padding:14px 16px">${esc(d.text.slice(0,2000))}${d.text.length>2000?"\n…（仅预览前 2000 字）":""}</div>`;
+    const foot=mask.querySelector(".foot");
+    foot.innerHTML=`<button class="tbtn" id="pvCancel">取消</button>
+      <button class="tbtn" id="pvReplace">替换当前内容</button>
+      <button class="btn primary" id="pvMerge" style="padding:7px 14px">并入作答区末尾</button>`;
+    mask.classList.add("show");
+    const close=()=>{ mask.classList.remove("show");
+      foot.innerHTML=`<button class="tbtn" id="modalClose">关闭</button>
+        <button class="btn primary" id="modalRestore" style="padding:7px 14px">恢复到作答区</button>`;
+      bindModalButtons(); };
+    document.getElementById("pvCancel").onclick=()=>{ close(); res(null); };
+    document.getElementById("pvReplace").onclick=()=>{ close(); res("replace"); };
+    document.getElementById("pvMerge").onclick=()=>{ close(); res("merge"); };
+  });
+}
 document.getElementById("btnOpenFile").addEventListener("click", async ()=>{
   toast("在弹出的窗口中选择文件…");
   const d=await api("/api/open-file",{});
-  mergeLoaded(d,"merge");
+  if(d.error){ toast(d.error); return; }
+  if(d.canceled) return;
+  const mode=await openPreview(d);
+  if(mode) mergeLoaded(d, mode);
 });
 document.getElementById("btnOpenFolder").addEventListener("click", async ()=>{
   const r=await api("/api/open-folder",{});
-  if(!r.ok) toast("无法打开文件夹");
+  if(!r.ok) toast("无法打开文件夹（已尝试打开「申论存档」）");
 });
 ["dragover","drop"].forEach(ev=>paperWrap.addEventListener(ev, e=>{
   e.preventDefault();
@@ -721,21 +800,55 @@ historyList.addEventListener("click", async e=>{
     document.getElementById("modalRestore").style.display="inline-block";
     document.getElementById("modalMask").classList.add("show");
   }else if(act==="restore"){
-    if(!confirm("用这条历史覆盖当前作答区？当前未存档内容会被替换。")) return;
+    if(!await askConfirm("用这条历史覆盖当前作答区？当前未存档内容会被替换。")) return;
     ghost.value=item.text; text=item.text;
     await api("/api/draft",{text});
     render(); toast("已恢复到作答区");
   }else if(act==="del"){
-    if(!confirm("确定删除这条历史记录？")) return;
+    if(!await askConfirm("确定删除这条历史记录？")) return;
     await api("/api/history/delete",{id});
     await loadHistory(); toast("已删除");
   }
 });
 
+// ---------- 页内确认/输入弹窗（替代被浏览器拦截的原生 confirm/prompt） ----------
+function askConfirm(msg){
+  return new Promise(res=>{
+    const mask=document.getElementById("askMask");
+    document.getElementById("askText").textContent=msg;
+    const inp=document.getElementById("askInput");
+    inp.style.display="none";
+    document.getElementById("askOk").textContent="确定";
+    mask.classList.add("show");
+    const done=v=>{ mask.classList.remove("show");
+      document.getElementById("askOk").onclick=null;
+      document.getElementById("askCancel").onclick=null; res(v); };
+    document.getElementById("askOk").onclick=()=>done(true);
+    document.getElementById("askCancel").onclick=()=>done(false);
+  });
+}
+function askText(msg, def){
+  return new Promise(res=>{
+    const mask=document.getElementById("askMask");
+    document.getElementById("askText").textContent=msg;
+    const inp=document.getElementById("askInput");
+    inp.value=def||""; inp.style.display="block";
+    document.getElementById("askOk").textContent="确定";
+    mask.classList.add("show");
+    setTimeout(()=>{ inp.focus(); inp.select(); },50);
+    const done=v=>{ mask.classList.remove("show");
+      document.getElementById("askOk").onclick=null;
+      document.getElementById("askCancel").onclick=null; res(v); };
+    document.getElementById("askOk").onclick=()=>done(inp.value);
+    document.getElementById("askCancel").onclick=()=>done(null);
+    inp.onkeydown=e=>{ if(e.key==="Enter") done(inp.value); };
+  });
+}
+
 // ---------- 工具栏按钮 ----------
 document.getElementById("btnSaveHistory").addEventListener("click", async ()=>{
   if(!text.trim()){ toast("作答区还是空的"); return; }
-  const label=prompt("给这条记录起个名字（可留空）：","");
+  const label=await askText("给这条记录起个名字（可留空）：","");
   const r=await api("/api/history",{text,label:(label||"").trim()});
   if(r.ok){ await loadHistory(); toast("已保存为历史记录"); }
   else toast("保存失败：内容为空");
@@ -748,22 +861,25 @@ document.getElementById("btnCopy").addEventListener("click", async ()=>{
 document.getElementById("btnPrint").addEventListener("click", ()=>window.print());
 document.getElementById("btnClear").addEventListener("click", async ()=>{
   if(!text){ toast("已经是空的"); return; }
-  if(!confirm("一键清空：将删除当前作答区全部内容（历史记录不受影响），确定？")) return;
+  if(!await askConfirm("一键清空：将删除当前作答区全部内容（历史记录不受影响），确定？")) return;
   ghost.value=""; text="";
   await api("/api/clear",{});
   render(); toast("已清空");
 });
 document.getElementById("btnAddPage").addEventListener("click", ()=>{ reservedPages++; render(); toast("已加一页"); });
 
-// 弹窗
-document.getElementById("modalClose").addEventListener("click",()=>document.getElementById("modalMask").classList.remove("show"));
-document.getElementById("modalRestore").addEventListener("click", async ()=>{
-  if(!confirm("用这条历史覆盖当前作答区？")) return;
-  ghost.value=modalRestoreText; text=modalRestoreText;
-  await api("/api/draft",{text});
-  document.getElementById("modalMask").classList.remove("show");
-  render(); toast("已恢复到作答区");
-});
+// 弹窗（历史预览的关闭/恢复按钮在预览窗重建后需重新绑定）
+function bindModalButtons(){
+  document.getElementById("modalClose").onclick=()=>document.getElementById("modalMask").classList.remove("show");
+  document.getElementById("modalRestore").onclick=async ()=>{
+    if(!await askConfirm("用这条历史覆盖当前作答区？")) return;
+    ghost.value=modalRestoreText; text=modalRestoreText;
+    await api("/api/draft",{text});
+    document.getElementById("modalMask").classList.remove("show");
+    render(); toast("已恢复到作答区");
+  };
+}
+bindModalButtons();
 document.getElementById("modalMask").addEventListener("click",e=>{
   if(e.target.id==="modalMask") document.getElementById("modalMask").classList.remove("show");
 });
