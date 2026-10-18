@@ -7,6 +7,7 @@ import sys
 import json
 import time
 import threading
+import subprocess
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -76,7 +77,7 @@ def write_index(items):
     os.replace(tmp, INDEX_PATH)
 
 
-# 标点集合（与前端一致：连续标点合占一格）
+# 标点集合（与前端一致：连续标点每两符号合占一格）
 _PUNCT = set("，。、；：！？）】」』”’…—·》〉（【「『“‘《〈,.!?;:)][(\"'<")
 
 
@@ -85,7 +86,7 @@ def _is_digit(ch):
 
 
 def count_cells(text):
-    """按稿纸格数统计：数字两位一格，连续标点一格，其余一字一格，换行不计。"""
+    """按稿纸格数统计：数字两位一格，连续标点每两符号合占一格，其余一字一格，换行不计。"""
     total = 0
     for para in text.split("\n"):
         i, n = 0, len(para)
@@ -97,16 +98,13 @@ def count_cells(text):
                     j += 1
                 total += (j - i + 1) // 2  # 每两位一格，落单一位也算一格
                 i = j
-            elif ch in ("…", "—"):
-                # 叠用符号 …… / —— 连续出现合占一格
-                j = i
-                while j < n and para[j] == ch:
-                    j += 1
-                total += 1
-                i = j
             elif ch in _PUNCT:
-                total += 1  # 普通标点各自一格
-                i += 1
+                j = i
+                while j < n and para[j] in _PUNCT:
+                    j += 1
+                run = j - i
+                total += (run + 1) // 2  # 连续标点每两个合占一格，落单也算一格
+                i = j
             else:
                 total += 1
                 i += 1
@@ -164,6 +162,74 @@ def delete_history(entry_id):
         else:
             kept.append(it)
     write_index(kept)
+
+
+def open_save_folder():
+    """在系统文件管理器中打开存档文件夹。"""
+    ensure_dir()
+    try:
+        if os.name == "nt":
+            os.startfile(SAVE_DIR)  # 仅 Windows
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", SAVE_DIR])
+        else:
+            subprocess.Popen(["xdg-open", SAVE_DIR])
+        return True
+    except OSError:
+        return False
+
+
+def _decode_bytes(raw):
+    """按常见编码尝试解码 txt（UTF-8 / 带 BOM / UTF-16 / GB 系列）。"""
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    for enc in ("gb18030", "big5"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+def pick_and_load():
+    """弹出系统「打开文件」对话框选 txt，读取并返回文本。取消时返回 canceled。"""
+    path = None
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)  # 防止对话框被浏览器窗口压在下面
+        try:
+            path = filedialog.askopenfilename(
+                parent=root,
+                title="选择要打开的文本文件",
+                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+            )
+        finally:
+            root.destroy()
+    except Exception as e:
+        return {"ok": False, "error": f"无法打开选择窗口：{e}"}
+    if not path:
+        return {"ok": False, "canceled": True}
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        return {"ok": False, "error": f"读取失败：{e}"}
+    txt = _decode_bytes(raw).replace("\r\n", "\n").replace("\r", "\n")
+    truncated = False
+    if len(txt) > 100000:
+        txt = txt[:100000]
+        truncated = True
+    return {"ok": True, "text": txt, "name": os.path.basename(path), "truncated": truncated}
 
 
 # ============ 页面 ============
@@ -249,8 +315,9 @@ button{font-family:inherit;cursor:pointer}
 .g-row .cell.caret{outline:2px solid var(--red);outline-offset:-2px;background:var(--red-soft)}
 /* 两位数字合占一格：字号略小、等宽 */
 .cell.num{font-family:Consolas,"Courier New",monospace;font-size:0.74em;letter-spacing:1px}
-/* 并入同一格的连续标点紧凑显示 */
+/* 并入同一格的连续标点紧凑显示；三字以上再缩小 */
 .cell.punct{font-size:0.92em;letter-spacing:0}
+.cell.tiny{font-size:11px;letter-spacing:0;line-height:1.2}
 /* 每行格子下方的空白间隔带，累计字数标在带内右侧 */
 .g-gap{position:relative;height:1.15em;min-height:16px}
 .g-gap .scale{position:absolute;right:2px;top:50%;transform:translateY(-50%);
@@ -261,9 +328,12 @@ button{font-family:inherit;cursor:pointer}
 .mini .cell{font-size:13px;border-color:#ddd}
 .mini .g-gap{height:.7em;min-height:8px}
 
-/* 跟随输入框（承接中文输入法） */
-#ghost{position:fixed;opacity:0;border:none;outline:none;background:transparent;
-  font-size:18px;caret-color:transparent;z-index:99;width:24px;height:24px;padding:0}
+/* 隐藏输入框（承接中文输入法）：平时藏在屏幕左上角；聚焦后移动到正在写的
+   格子旁边，输入法候选窗就会跟着书写位置走，不会跑到屏幕左上角 */
+#ghost{position:fixed;left:0;top:0;width:24px;height:24px;opacity:0;border:none;
+  outline:none;background:transparent;font-size:18px;caret-color:transparent;
+  z-index:99;padding:0;pointer-events:none}
+#ghost.live{opacity:.01}
 
 /* 历史预览弹窗 */
 #modalMask{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;
@@ -305,6 +375,8 @@ button{font-family:inherit;cursor:pointer}
   </div>
   <div class="side-actions">
     <button class="btn primary" id="btnSaveHistory">保存为历史记录</button>
+    <button class="btn" id="btnOpenFile">打开文件…（并入作答区）</button>
+    <button class="btn" id="btnOpenFolder">打开存档文件夹</button>
     <button class="btn" id="btnCopy">复制全文</button>
     <button class="btn" id="btnPrint">打印 / 另存 PDF</button>
     <button class="btn danger" id="btnClear">一键清空</button>
@@ -314,7 +386,7 @@ button{font-family:inherit;cursor:pointer}
   </div>
   <div class="side-section"><span>历史记录</span><span id="histMeta"></span></div>
   <div id="historyList"></div>
-  <div class="side-foot">存档保存在程序同目录的「申论存档」文件夹：当前草稿自动存为「当前草稿.txt」。</div>
+  <div class="side-foot">存档保存在程序同目录的「申论存档」文件夹：当前草稿自动存为「当前草稿.txt」。也可把 .txt 文件直接拖进方格纸打开。</div>
 </aside>
 
 <!-- ===== 右侧主区 ===== -->
@@ -355,6 +427,23 @@ const ghost = document.getElementById("ghost");
 const paperWrap = document.getElementById("paperWrap");
 const historyList = document.getElementById("historyList");
 
+// 输入法候选窗跟随：把隐藏输入框定位到当前光标所在格子旁
+function positionGhost(){
+  try{
+    const cell = paperWrap.querySelector(".cell.caret") || paperWrap.querySelector(".cell");
+    if(!cell) return;
+    const cr = cell.getBoundingClientRect();
+    const wr = paperWrap.getBoundingClientRect();
+    let left = cr.left, top = cr.bottom - 2;
+    if(left > wr.right - 34) left = wr.right - 34;
+    if(left < wr.left) left = wr.left;
+    if(top  > wr.bottom - 34) top = wr.bottom - 34;
+    if(top  < wr.top) top = wr.top;
+    ghost.style.left = left + "px";
+    ghost.style.top = top + "px";
+  }catch(_){}
+}
+
 // ---------- 工具 ----------
 function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function countChars(t){ return [...t].filter(c=>c!=="\n").length; }
@@ -386,15 +475,12 @@ function tokenizePara(para, base){
       while(j<para.length&&DIGIT_RE.test(para[j])){raw+=normDigit(para[j]);j++;}
       for(let k=0;k<raw.length;k+=2){toks.push({text:raw.slice(k,k+2),start:base+i+k,kind:'num'});}
       i=j;
-    }else if(ch==='…'||ch==='—'){
-      // 叠用符号：省略号 …… 、破折号 —— 连续出现合占一格
-      let j=i; while(j<para.length&&para[j]===ch) j++;
-      toks.push({text:para.slice(i,j),start:base+i,kind:'punct'});
-      i=j;
     }else if(PUNCT_ALL.has(ch)){
-      // 普通标点（，。、；：！？等）各自占一格
-      toks.push({text:ch,start:base+i,kind:'punct'});
-      i++;
+      // 连续标点合占一格（如 ：“ ，。 ！！ …… ——），每格最多放两个
+      let j=i, run="";
+      while(j<para.length&&PUNCT_ALL.has(para[j])){run+=para[j];j++;}
+      for(let k=0;k<run.length;k+=2){toks.push({text:run.slice(k,k+2),start:base+i+k,kind:'punct'});}
+      i=j;
     }else{
       toks.push({text:ch,start:base+i,kind:ch===' '?'space':'ch'});
       i++;
@@ -403,7 +489,8 @@ function tokenizePara(para, base){
   return toks;
 }
 
-// 每行 25 格；避头点：行满时标点并入上一格
+// 每行 25 格；避头点：行满时收尾标点并入上一格；开口引号/括号不悬在行尾
+const OPEN_HEAD=new Set([...PUNCT_ALL].filter(c=>!BAN_HEAD.has(c)));
 function buildLinesFrom(src){
   const lines=[]; let base=0;
   const paras=src.split('\n');
@@ -413,13 +500,19 @@ function buildLinesFrom(src){
     let cur=[];
     for(const tk of toks){
       if(cur.length>=COLS){
-        // 避头点：行满时标点并入上一格
+        // 避头点：行满时收尾标点并入上一格
         if(cur.length && BAN_HEAD.has(tk.text[0])){
           cur[cur.length-1].text+=tk.text;
           cur[cur.length-1].merged=true;
         }
         else{lines.push(cur);cur=[];cur.push(tk);}
-      }else cur.push(tk);
+      }else{
+        cur.push(tk);
+        // 行尾禁则：开口引号/括号不得悬在行尾，移到下一行行首
+        if(cur.length===COLS && OPEN_HEAD.has(tk.text[0])){
+          cur.pop(); lines.push(cur); cur=[tk];
+        }
+      }
     }
     lines.push(cur);
   }
@@ -430,7 +523,22 @@ function buildLines(){ return buildLinesFrom(text); }
 // 所占格数
 function countCells(src){
   let n=0,base=0;
-  for(const para of src.split('\n')){n+=tokenizePara(para,base).length;base+=para.length+1;}
+  for(const para of src.split('\n')){
+    const toks=tokenizePara(para,base);
+    // 与 buildLinesFrom 相同的合占规则：行满并入上一格的标点不再另占格
+    base+=para.length+1;
+    let cur=[];
+    for(const tk of toks){
+      if(cur.length>=COLS){
+        if(cur.length && BAN_HEAD.has(tk.text[0])){ /* 并入上一格，不加格数 */ }
+        else{ n+=cur.length; cur=[tk]; continue; }
+      }else cur.push(tk);
+      if(cur.length===COLS && OPEN_HEAD.has(tk.text[0])){
+        cur.pop(); n+=cur.length; cur=[tk];
+      }
+    }
+    n+=cur.length;
+  }
   return n;
 }
 
@@ -442,6 +550,7 @@ function rowHtml(line, caret, rowInPage, mini){
     let cls="cell";
     if(tk&&tk.kind==='num') cls+=" num";
     if(tk&&(tk.kind==='punct'||tk.merged)) cls+=" punct";
+    if(tk&&tk.text.length>2) cls+=" tiny";
     let attr="";
     if(tk){
       if(caret!=null&&caret>=tk.start&&caret<tk.start+tk.text.length) cls+=" caret";
@@ -480,13 +589,14 @@ function render(){
     html+=`<section class="page">
       <div class="page-head"><span class="ph-title">试 卷</span><span class="ph-no">第 ${p+1} 页</span></div>
       <div class="sheet">${sheetHtml}</div>
-      <div class="page-foot">25 × 20 = 500 字（数字两位一格，标点不上行首）</div>
+      <div class="page-foot">25 × 20 = 500 字（数字两位一格，连续标点合占一格，标点不上行首）</div>
     </section>`;
   }
   paperWrap.innerHTML=html;
   const n=countCells(text);
   document.getElementById("statCount").textContent=n;
   document.getElementById("tbCount").textContent=n;
+  positionGhost();
 }
 
 // 点击格子定位光标
@@ -501,6 +611,60 @@ paperWrap.addEventListener("click", e=>{
   render();
 });
 
+// ---------- 拖拽 txt 文件到页面直接打开 ----------
+function mergeLoaded(d, mode){
+  if(d.error){ toast(d.error); return; }
+  if(d.canceled) return;
+  const t=d.text||"";
+  if(mode==="replace" || !text.trim()){
+    ghost.value=t; text=t;
+  }else{
+    const sep=text.endsWith("\n")||!text?"":"\n";
+    ghost.value=text+sep+t; text=ghost.value;
+  }
+  ghost.setSelectionRange(text.length,text.length);
+  api("/api/draft",{text}).catch(()=>{});
+  render();
+  toast(`已打开「${d.name||"文件"}」${d.truncated?"（超长部分已截断）":""}`);
+}
+document.getElementById("btnOpenFile").addEventListener("click", async ()=>{
+  toast("在弹出的窗口中选择文件…");
+  const d=await api("/api/open-file",{});
+  mergeLoaded(d,"merge");
+});
+document.getElementById("btnOpenFolder").addEventListener("click", async ()=>{
+  const r=await api("/api/open-folder",{});
+  if(!r.ok) toast("无法打开文件夹");
+});
+["dragover","drop"].forEach(ev=>paperWrap.addEventListener(ev, e=>{
+  e.preventDefault();
+  if(ev==="drop"){
+    const f=e.dataTransfer.files&&e.dataTransfer.files[0];
+    if(!f) return;
+    f.text().then(t=>{
+      const name=f.name||"拖入文件";
+      if(!/\.txt$/i.test(name)){
+        f.arrayBuffer().then(buf=>{
+          const raw=new Uint8Array(buf), head=raw.slice(0,4);
+          const utf8 = head[0]===0xEF&&head[1]===0xBB&&head[2]===0xBF;
+          try{
+            let s=new TextDecoder("utf-8",{fatal:true}).decode(
+              utf8?raw.slice(3):raw);
+            mergeLoaded({ok:true,text:s.replace(/\r\n/g,"\n"),name},"merge");
+          }catch(_){
+            try{
+              const s=new TextDecoder("gb18030").decode(raw);
+              mergeLoaded({ok:true,text:s.replace(/\r\n/g,"\n"),name},"merge");
+            }catch(__){ mergeLoaded({error:"无法识别该文件编码"}, "merge"); }
+          }
+        });
+      }else{
+        f.text().then(t2=>mergeLoaded({ok:true,text:t2.replace(/\r\n/g,"\n"),name},"merge"));
+      }
+    });
+  }
+}));
+
 // ---------- 输入与自动保存 ----------
 ghost.addEventListener("input", ()=>{
   text=ghost.value;
@@ -513,6 +677,11 @@ ghost.addEventListener("keydown", e=>{
   clearTimeout(saveTimer);
   saveTimer=setTimeout(()=>{text=ghost.value;render();api("/api/draft",{text}).catch(()=>{});},300);
 });
+
+ghost.addEventListener("focus", ()=>{ ghost.classList.add("live"); positionGhost(); });
+ghost.addEventListener("blur",  ()=>ghost.classList.remove("live"));
+ghost.addEventListener("keyup", positionGhost);
+ghost.addEventListener("mouseup", positionGhost);
 
 // ---------- 历史记录 ----------
 async function loadHistory(){
@@ -599,6 +768,11 @@ document.getElementById("modalMask").addEventListener("click",e=>{
   if(e.target.id==="modalMask") document.getElementById("modalMask").classList.remove("show");
 });
 
+// 心跳保活：页面开着每 1.5 秒报一次平安；页面关闭（或刷新断开）后
+// 后端 5 秒收不到心跳就自动退出。刷新时新页面立即恢复心跳，不会误关。
+setInterval(()=>{ fetch("/api/ping",{method:"POST",body:"{}"}).catch(()=>{}); }, 1500);
+fetch("/api/ping",{method:"POST",body:"{}"}).catch(()=>{});
+
 // 启动：把焦点交给 ghost，便于直接打字
 loadHistory().then(()=>{ ghost.focus(); });
 </script>
@@ -657,6 +831,13 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/clear":
             write_draft("")
             self._send(200, {"ok": True})
+        elif path == "/api/open-file":
+            self._send(200, pick_and_load())
+        elif path == "/api/open-folder":
+            self._send(200, {"ok": open_save_folder()})
+        elif path == "/api/ping":
+            HEARTBEAT["t"] = time.time()
+            self._send(200, {"ok": True})
         else:
             self._send(404, {"ok": False})
 
@@ -670,12 +851,35 @@ def find_port(start=8765):
     return start
 
 
+# 心跳：页面关闭/刷新断开 5 秒后自动退出程序（刷新会很快恢复心跳，不退出）
+HEARTBEAT = {"t": time.time()}
+
+
+def _watchdog():
+    while True:
+        time.sleep(1)
+        if time.time() - HEARTBEAT["t"] > 5:
+            os._exit(0)
+
+
 def main():
+    # --noconsole 打包后没有标准输出，print 会崩溃，这里统一丢弃
+    if getattr(sys, "frozen", False) or sys.stdout is None or sys.stderr is None:
+        try:
+            devnull = open(os.devnull, "w", encoding="utf-8")
+            if sys.stdout is None:
+                sys.stdout = devnull
+            if sys.stderr is None:
+                sys.stderr = devnull
+        except OSError:
+            pass
     ensure_dir()
+    threading.Thread(target=_watchdog, daemon=True).start()
     port = find_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
-    threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    if os.environ.get("SHENLUN_NO_BROWSER") != "1":
+        threading.Timer(0.25, lambda: webbrowser.open(url)).start()
     print(f"{APP_TITLE} 已启动：{url}")
     print("存档文件夹：" + SAVE_DIR)
     print("关闭本窗口即退出程序。")

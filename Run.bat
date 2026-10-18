@@ -1,9 +1,15 @@
 @echo off
 cd /d "%~dp0"
 title ShenLun Grid
-echo Starting ShenLun Grid, the page will open in your browser shortly...
-echo.
 
+where pythonw >nul 2>nul
+if errorlevel 1 goto check_python
+
+rem pythonw = no black console window
+start "" pythonw main.py
+exit /b
+
+:check_python
 where python >nul 2>nul
 if errorlevel 1 (
   echo [NOTICE] Python was not found on this computer.
@@ -18,9 +24,5 @@ if errorlevel 1 (
   pause
   exit /b
 )
-
-python main.py
-
-echo.
-echo Program window closed. You may press any key to exit.
-pause
+start "" python main.py
+exit /b

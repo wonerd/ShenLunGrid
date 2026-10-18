@@ -21,7 +21,7 @@ if errorlevel 1 (
 
 echo [1/2] Preparing the build tool (downloads on first run, please wait)...
 python -m pip install --upgrade pip
-python -m pip install pyinstaller
+python -m pip install pyinstaller pillow
 if errorlevel 1 (
   echo.
   echo [ERROR] Could not install pyinstaller. Check your network and retry.
@@ -31,12 +31,16 @@ if errorlevel 1 (
 
 echo.
 echo [2/2] Building, please wait 1-2 minutes, do not close this window...
-python -m PyInstaller --onefile --console --name ShenLunGrid main.py
+set ICONOPT=
+if exist icon.ico set ICONOPT=--icon icon.ico
+python -m PyInstaller --onefile --noconsole --clean %ICONOPT% --name ShenLunGrid main.py
 
 echo.
 echo ============================================
 echo Done. The EXE is here:  dist\ShenLunGrid.exe
-echo Copy that exe to any folder and double-click to run.
+echo No black window. Close the browser tab to exit.
+echo If Windows says "untrusted": right-click the exe,
+echo click Properties, tick "Unblock", then OK.
 echo Saved drafts and history go into a folder next to the exe.
 echo ============================================
 pause
