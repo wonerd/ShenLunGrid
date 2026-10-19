@@ -375,6 +375,9 @@ button{font-family:inherit;cursor:pointer}
   background:rgba(30,30,32,.9);color:#fff;padding:10px 18px;border-radius:8px;
   font-size:14px;opacity:0;transition:.25s;z-index:300;pointer-events:none}
 #toast.show{opacity:1}
+#fatal{display:none;margin:0;padding:14px 18px;background:#c0392b;color:#fff;
+  font:14px/1.6 "Consolas","Microsoft YaHei",sans-serif;white-space:pre-wrap;z-index:400}
+#fatal.show{display:block}
 
 /* 窄屏：左栏变顶部 */
 @media (max-width:760px){
@@ -393,6 +396,26 @@ button{font-family:inherit;cursor:pointer}
 </style>
 </head>
 <body>
+<div id="fatal"></div>
+<script>
+// 兜底：任何脚本错误都直接显示在页面顶部，避免"白屏且按钮没反应"却查不到原因
+(function(){
+  function show(msg){
+    var el=document.getElementById("fatal");
+    if(!el) return;
+    el.textContent="脚本出错，功能可能不可用：\n"+msg;
+    el.classList.add("show");
+  }
+  window.addEventListener("error",function(e){
+    var m=e.message||"";
+    if(e.filename) m+="  ("+e.filename.split("/").pop()+":"+e.lineno+":"+e.colno+")";
+    show(m);
+  });
+  window.addEventListener("unhandledrejection",function(e){
+    show("Promise: "+((e.reason&&(e.reason.message||e.reason))||"unknown"));
+  });
+})();
+</script>
 <!-- ===== 左侧栏 ===== -->
 <aside id="sidebar">
   <div class="brand">
@@ -502,7 +525,7 @@ const BAN_HEAD=new Set(['，','。','、','；','：','！','？','）','】','�
 // 全部标点
 const PUNCT_ALL=new Set([...BAN_HEAD,'（','【','「','『','“','‘','《','〈','(', '[']);
 // 与冒号连用合占一格的前引号（：“ 合一格）
-const OPEN_Q=new Set(['“','‘','"',''']);
+const OPEN_Q=new Set(['“','‘','"',"'"]);
 function normDigit(ch){const c=ch.codePointAt(0);return (c>=0xFF10&&c<=0xFF19)?String.fromCharCode(c-0xFEE0):ch;}
 
 // 把一整段切成「格单元」：数字每 2 个合占一格；1. 2. 与 ：“ 合占一格；
@@ -884,10 +907,13 @@ document.getElementById("modalMask").addEventListener("click",e=>{
   if(e.target.id==="modalMask") document.getElementById("modalMask").classList.remove("show");
 });
 
-// 心跳保活：页面开着每 1.5 秒报一次平安；页面关闭（或刷新断开）后
-// 后端 5 秒收不到心跳就自动退出。刷新时新页面立即恢复心跳，不会误关。
-setInterval(()=>{ fetch("/api/ping",{method:"POST",body:"{}"}).catch(()=>{}); }, 1500);
-fetch("/api/ping",{method:"POST",body:"{}"}).catch(()=>{});
+// 心跳保活：页面开着就定期报平安（后台标签页被浏览器限流也没关系，
+// 后端给了足够宽限）。页面关闭一段时间后程序自动退出。
+function ping(){ try{ fetch("/api/ping",{method:"POST",body:"{}",keepalive:true}).catch(()=>{}); }catch(_){} }
+ping();
+setInterval(ping, 2000);
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) ping(); });
+window.addEventListener("pageshow", ping);
 
 // 启动：把焦点交给 ghost，便于直接打字
 loadHistory().then(()=>{ ghost.focus(); });
@@ -953,6 +979,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": open_save_folder()})
         elif path == "/api/ping":
             HEARTBEAT["t"] = time.time()
+            HEARTBEAT["seen"] = True
             self._send(200, {"ok": True})
         else:
             self._send(404, {"ok": False})
@@ -967,14 +994,28 @@ def find_port(start=8765):
     return start
 
 
-# 心跳：页面关闭/刷新断开 5 秒后自动退出程序（刷新会很快恢复心跳，不退出）
-HEARTBEAT = {"t": time.time()}
+# 心跳：页面关闭后自动退出。宽限期足够长，刷新/最小化/后台标签页都不会误退出。
+HEARTBEAT = {"t": 0.0, "seen": False}
+START_AT = time.time()
+GRACE = 120   # 启动后 120 秒内浏览器一直没连上 -> 认为没打开成功，退出
+IDLE = 600    # 页面连上后，超过 600 秒没有任何心跳 -> 认为页面已关闭，退出
 
 
-def _watchdog():
+def _watchdog(url):
+    retried = False
     while True:
         time.sleep(1)
-        if time.time() - HEARTBEAT["t"] > 5:
+        if not HEARTBEAT["seen"]:
+            age = time.time() - START_AT
+            if not retried and age > 12:
+                retried = True
+                try:
+                    webbrowser.open(url)
+                except Exception:
+                    pass
+            elif age > GRACE:
+                os._exit(0)
+        elif time.time() - HEARTBEAT["t"] > IDLE:
             os._exit(0)
 
 
@@ -990,10 +1031,10 @@ def main():
         except OSError:
             pass
     ensure_dir()
-    threading.Thread(target=_watchdog, daemon=True).start()
     port = find_port()
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
+    threading.Thread(target=_watchdog, args=(url,), daemon=True).start()
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     if os.environ.get("SHENLUN_NO_BROWSER") != "1":
         threading.Timer(0.25, lambda: webbrowser.open(url)).start()
     print(f"{APP_TITLE} 已启动：{url}")

@@ -19,15 +19,20 @@ if errorlevel 1 (
   exit /b
 )
 
-echo [1/2] Preparing the build tool (downloads on first run, please wait)...
-python -m pip install --upgrade pip
-python -m pip install pyinstaller pillow
+echo [1/2] Checking the build tool...
+python -c "import PyInstaller" >nul 2>nul
 if errorlevel 1 (
-  echo.
-  echo [ERROR] Could not install pyinstaller. Check your network and retry.
-  pause
-  exit /b
+  echo     PyInstaller not found, installing ^(needs network^)...
+  python -m pip install pyinstaller
+  python -c "import PyInstaller" >nul 2>nul
+  if errorlevel 1 (
+    echo.
+    echo [ERROR] PyInstaller is unavailable. Check your network and retry.
+    pause
+    exit /b
+  )
 )
+echo     OK.
 
 echo.
 echo [2/2] Building, please wait 1-2 minutes, do not close this window...
