@@ -405,6 +405,10 @@ button{font-family:inherit;cursor:pointer}
 .ask input{width:100%;margin-top:10px;border:1px solid var(--line);border-radius:8px;
   padding:8px 10px;font-size:14px;font-family:inherit}
 .ask .ask-btns{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+#reviewTip{display:none;margin:10px 14px 0;padding:10px 12px;background:#fff7ed;
+  border:1px solid #fed7aa;border-radius:8px;font-size:13px;color:#9a3412}
+body.review-mode #reviewTip{display:block}
+body.review-mode #paperWrap{pointer-events:auto}
 
 #toast{position:fixed;left:50%;bottom:34px;transform:translateX(-50%);
   background:rgba(30,30,32,.9);color:#fff;padding:10px 18px;border-radius:8px;
@@ -457,6 +461,7 @@ button{font-family:inherit;cursor:pointer}
     <h1>申论方格纸</h1>
     <p>离线练习 · 数据保存在程序同目录</p>
   </div>
+  <div id="reviewTip">阅读校对模式：内容只读，点右上角按钮切回打字模式。</div>
   <div class="side-actions">
     <button class="btn primary" id="btnSaveHistory">保存为历史记录</button>
     <button class="btn" id="btnOpenFile">打开文件…（并入作答区）</button>
@@ -479,6 +484,7 @@ button{font-family:inherit;cursor:pointer}
     <span class="t-title">作答区（25 格 × 20 行 = 每页 500 字）</span>
     <span class="spacer"></span>
     <span class="t-count">当前 <b id="tbCount">0</b> 字</span>
+    <button class="tbtn" id="btnMode">切到阅读校对</button>
     <button class="tbtn" id="btnAddPage">加一页</button>
   </div>
   <div id="paperWrap"></div>
@@ -949,8 +955,72 @@ setInterval(ping, 2000);
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) ping(); });
 window.addEventListener("pageshow", ping);
 
-// 启动：把焦点交给 ghost，便于直接打字
-loadHistory().then(()=>{ ghost.focus(); });
+// ---------- 模式选择：打字模式 / 阅读校对模式 ----------
+let readOnlyMode = false;
+function restoreModalFoot(){
+  const foot = document.querySelector("#modalMask .foot");
+  if(!foot) return;
+  foot.innerHTML = `<button class="tbtn" id="modalClose">关闭</button>
+    <button class="btn primary" id="modalRestore" style="padding:7px 14px">恢复到作答区</button>`;
+  bindModalButtons();
+}
+function toggleMode(){
+  readOnlyMode = !readOnlyMode;
+  document.body.classList.toggle("review-mode", readOnlyMode);
+  localStorage.setItem("sl_mode", readOnlyMode ? "review" : "typing");
+  if(readOnlyMode){ ghost.blur(); }
+  toast(readOnlyMode ? "已切换到阅读校对模式" : "已切换到打字模式");
+}
+document.getElementById("btnMode").addEventListener("click", toggleMode);
+function chooseMode(){
+  return new Promise(res=>{
+    const saved = localStorage.getItem("sl_mode");
+    if(saved === "typing" || saved === "review"){
+      readOnlyMode = (saved === "review");
+      document.body.classList.toggle("review-mode", readOnlyMode);
+      res(); return;
+    }
+    const mask = document.getElementById("modalMask");
+    const title = document.getElementById("modalTitle");
+    const body  = document.getElementById("modalBody");
+    const foot  = mask.querySelector(".foot");
+    title.textContent = "请选择模式";
+    body.innerHTML = `
+      <p style="margin:0 0 12px;font-size:14px;color:var(--ink-2)">每次打开都会先弹这个窗口（记住选择后就不再打扰）：</p>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        <button class="btn primary" id="modeTyping" style="flex:1;min-width:180px;padding:14px">打字模式<br>
+          <span style="font-size:12px;font-weight:400;color:var(--ink-2)">直接在方格纸上作答</span></button>
+        <button class="btn" id="modeReview" style="flex:1;min-width:180px;padding:14px">阅读校对模式<br>
+          <span style="font-size:12px;font-weight:400;color:var(--ink-2)">只看格子与统计，不能改字</span></button>
+      </div>
+      <label style="display:flex;gap:6px;align-items:center;margin-top:14px;font-size:13px;color:var(--ink-2)">
+        <input type="checkbox" id="modeRemember" checked> 记住我的选择，下次不再询问</label>`;
+    foot.innerHTML = "";
+    mask.classList.add("show");
+    const enter = (m)=>{
+      readOnlyMode = (m === "review");
+      if(document.getElementById("modeRemember").checked){
+        localStorage.setItem("sl_mode", m);
+      }else{
+        localStorage.removeItem("sl_mode");
+      }
+      document.body.classList.toggle("review-mode", readOnlyMode);
+      restoreModalFoot();
+      mask.classList.remove("show");
+      toast(readOnlyMode ? "已进入阅读校对模式（页面底部可切回打字模式）" : "已进入打字模式");
+      res();
+    };
+    document.getElementById("modeTyping").onclick  = ()=>enter("typing");
+    document.getElementById("modeReview").onclick  = ()=>enter("review");
+  });
+}
+// 阅读校对模式下禁写：拦截输入与粘贴
+["input","keydown","paste"].forEach(ev=>ghost.addEventListener(ev, e=>{
+  if(readOnlyMode){ e.preventDefault(); e.stopPropagation(); }
+}, true));
+
+// 启动：先选模式，选完再把焦点交给 ghost
+loadHistory().then(()=>{ chooseMode().then(()=>ghost.focus()); });
 </script>
 </body>
 </html>
