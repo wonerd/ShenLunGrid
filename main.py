@@ -213,25 +213,60 @@ def _decode_bytes(raw):
     return raw.decode("utf-8", "replace")
 
 
+_GUI_Q = None
+_GUI_LOCK = threading.Lock()
+
+def _gui_worker(q):
+    """常驻 GUI 线程：tkinter 只在这一条线程里创建和销毁，避免线程亲和性问题。"""
+    while True:
+        item = q.get()
+        if item is None:
+            break
+        fn, box = item
+        try:
+            box["res"] = fn()
+        except BaseException as e:
+            box["err"] = e
+        finally:
+            box["done"].set()
+
+def _run_on_gui_thread(fn, timeout=600):
+    """把 fn 交给专用 GUI 线程执行并等待结果；失败/超时都返回显式 JSON。"""
+    global _GUI_Q
+    import queue
+    with _GUI_LOCK:
+        if _GUI_Q is None:
+            _GUI_Q = queue.Queue()
+            threading.Thread(target=_gui_worker, args=(_GUI_Q,),
+                             daemon=True, name="shenlun-gui").start()
+    box = {"done": threading.Event()}
+    _GUI_Q.put((fn, box))
+    if not box["done"].wait(timeout):
+        return {"ok": False, "canceled": True, "note": "选择窗口长时间未响应"}
+    if "err" in box:
+        return {"ok": False, "error": f"无法打开选择窗口：{box['err']}"}
+    return box["res"]
+
 def pick_and_load():
     """弹出系统「打开文件」对话框选 txt，读取并返回文本。取消时返回 canceled。"""
-    path = None
-    try:
+    def _do_pick():
         import tkinter as tk
         from tkinter import filedialog
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)  # 防止对话框被浏览器窗口压在下面
         try:
-            path = filedialog.askopenfilename(
+            return filedialog.askopenfilename(
                 parent=root,
                 title="选择要打开的文本文件",
                 filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
             )
         finally:
             root.destroy()
-    except Exception as e:
-        return {"ok": False, "error": f"无法打开选择窗口：{e}"}
+
+    path = _run_on_gui_thread(_do_pick)
+    if isinstance(path, dict):  # GUI 线程返回的错误/超时 JSON
+        return path
     if not path:
         return {"ok": False, "canceled": True}
     try:
@@ -743,27 +778,26 @@ document.getElementById("btnOpenFolder").addEventListener("click", async ()=>{
   if(ev==="drop"){
     const f=e.dataTransfer.files&&e.dataTransfer.files[0];
     if(!f) return;
-    f.text().then(t=>{
-      const name=f.name||"拖入文件";
-      if(!/\.txt$/i.test(name)){
-        f.arrayBuffer().then(buf=>{
-          const raw=new Uint8Array(buf), head=raw.slice(0,4);
+    const name=f.name||"拖入文件";
+    (async ()=>{
+      let t;
+      try{
+        if(/\.txt$/i.test(name)){
+          t=await f.text();
+        }else{
+          const raw=new Uint8Array(await f.arrayBuffer()), head=raw.slice(0,4);
           const utf8 = head[0]===0xEF&&head[1]===0xBB&&head[2]===0xBF;
           try{
-            let s=new TextDecoder("utf-8",{fatal:true}).decode(
-              utf8?raw.slice(3):raw);
-            mergeLoaded({ok:true,text:s.replace(/\r\n/g,"\n"),name},"merge");
+            t=new TextDecoder("utf-8",{fatal:true}).decode(utf8?raw.slice(3):raw);
           }catch(_){
-            try{
-              const s=new TextDecoder("gb18030").decode(raw);
-              mergeLoaded({ok:true,text:s.replace(/\r\n/g,"\n"),name},"merge");
-            }catch(__){ mergeLoaded({error:"无法识别该文件编码"}, "merge"); }
+            t=new TextDecoder("gb18030").decode(raw);
           }
-        });
-      }else{
-        f.text().then(t2=>mergeLoaded({ok:true,text:t2.replace(/\r\n/g,"\n"),name},"merge"));
-      }
-    });
+        }
+      }catch(__){ toast("无法读取拖入的文件"); return; }
+      const d={ok:true,text:t.replace(/\r\n/g,"\n"),name};
+      const mode=await openPreview(d);   // 拖入也先预览，再选并入/替换
+      if(mode) mergeLoaded(d, mode);
+    })();
   }
 }));
 
